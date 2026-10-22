@@ -189,3 +189,26 @@ test("the guard-chip filter narrows the merged feed without dropping the others"
     await rendered.unmount();
   }
 });
+
+test("telemetry feed displays discontinuity warning and retains known-good cursor on gap", async () => {
+  const rendered = await renderFeed({
+    feed: {
+      watching: true,
+      latestLedger: 100,
+      error: null,
+      lastPolledAt: new Date().toISOString(),
+      guards: [{ guard: GUARD_A, label: "Guard A" }],
+      capped: 0,
+      cappedLabels: [],
+      discontinuity: true,
+      affectedLedgers: { start: 50, end: 100 },
+    },
+  });
+  try {
+    const text = rendered.container.textContent ?? "";
+    assert.match(text, /Cursor discontinuity detected/);
+    assert.match(text, /ledgers 50–100/);
+  } finally {
+    await rendered.unmount();
+  }
+});

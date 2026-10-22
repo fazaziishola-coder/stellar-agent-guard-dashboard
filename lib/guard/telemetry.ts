@@ -69,6 +69,8 @@ export type TelemetryEvent = GuardEvent & {
 /** One page of rows, carrying the SDK's own page fields (cursor, ledgers). */
 export type TelemetryPage = Omit<PollResult, "events"> & {
   events: TelemetryEvent[];
+  discontinuity?: boolean;
+  affectedLedgers?: { start: number; end: number } | undefined;
 };
 
 /**
@@ -91,6 +93,7 @@ export class GuardFeed {
   readonly guard: string;
   private readonly listener: GuardTelemetryListener;
   private cursor: string | null = null;
+  private lastKnownGoodCursor: string | null = null;
   private latestLedger: number | null = null;
 
   /** The raw `getEvents` page behind the most recent poll, captured for `raw`. */
@@ -141,13 +144,47 @@ export class GuardFeed {
         params.startLedger = this.latestLedger;
       }
       this.lastRawEvents = [];
-      const decoded = await this.listener.poll(params);
+      let decoded;
+      let discontinuity = false;
+      let affectedLedgers: { start: number; end: number } | undefined;
+      try {
+        decoded = await this.listener.poll(params);
+      } catch (err: unknown) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        if (
+          errMessage.includes("cursor") ||
+          errMessage.includes("ledger") ||
+          errMessage.includes("not found") ||
+          errMessage.includes("gap") ||
+          errMessage.includes("discontinuity")
+        ) {
+          discontinuity = true;
+          const prevLedger = this.latestLedger ?? 0;
+          const fallbackLedger = Math.max(1, prevLedger - 50);
+          affectedLedgers = { start: fallbackLedger, end: prevLedger };
+          // Recover by falling back to last known good cursor or resetting to latest ledger
+          if (this.lastKnownGoodCursor) {
+            params.cursor = this.lastKnownGoodCursor;
+          } else {
+            delete params.cursor;
+            params.startLedger = fallbackLedger;
+          }
+          decoded = await this.listener.poll(params);
+        } else {
+          throw err;
+        }
+      }
       const page = { ...decoded, events: attachLedgerXdr(decoded.events, this.lastRawEvents) };
-      // A page with no events still advances the ledger pointer, so the next poll
-      // does not re-scan a stretch of empty ledgers.
       this.latestLedger = Math.max(this.latestLedger ?? 0, page.latestLedger);
-      if (page.cursor) this.cursor = page.cursor;
-      return page;
+      if (page.cursor) {
+        this.lastKnownGoodCursor = page.cursor;
+        this.cursor = page.cursor;
+      }
+      return {
+        ...page,
+        discontinuity,
+        affectedLedgers,
+      };
     });
   }
 
@@ -159,6 +196,7 @@ export class GuardFeed {
   /** Forget the cursor so the feed re-scans from a given ledger. */
   resetFrom(ledger: number | null): void {
     this.cursor = null;
+    this.lastKnownGoodCursor = null;
     this.latestLedger = ledger;
   }
 
